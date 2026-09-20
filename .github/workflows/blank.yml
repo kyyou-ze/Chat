@@ -1,0 +1,117 @@
+name: Extract ZIP & Build APK
+
+on:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Extract & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Kalau ada file .zip di root repo, extract isinya ke root repo.
+      # Folder .github di dalam zip sengaja dilewati (GITHUB_TOKEN tidak boleh mengubah workflow).
+      - name: Extract ZIP (jika ada)
+        id: extract
+        run: |
+          ZIP=$(ls -t ./*.zip 2>/dev/null | head -n 1 || true)
+          if [ -z "$ZIP" ]; then
+            echo "Tidak ada file .zip di root repo, build langsung dari isi repo."
+            echo "zip=" >> "$GITHUB_OUTPUT"
+            if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
+              echo "project=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::notice::Belum ada proyek di repo. Upload file .zip proyek ke root repo, lalu jalankan ulang."
+              echo "project=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+          echo "Extract: $ZIP"
+          rm -rf /tmp/unz && mkdir /tmp/unz
+          unzip -q -o "$ZIP" -d /tmp/unz -x '.github/*' '*/.github/*' '__MACOSX/*'
+          # Kalau zip berisi satu folder induk saja, pakai isi folder itu
+          if [ "$(ls -A /tmp/unz | wc -l)" -eq 1 ] && [ -d "/tmp/unz/$(ls -A /tmp/unz)" ]; then
+            SRC="/tmp/unz/$(ls -A /tmp/unz)"
+          else
+            SRC=/tmp/unz
+          fi
+          cp -a "$SRC"/. .
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Isi proyek setelah extract:"
+          ls -la
+          if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
+            echo "project=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Zip tidak berisi proyek Gradle (settings.gradle.kts tidak ditemukan)."
+            echo "project=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Set up JDK 21
+        if: steps.extract.outputs.project == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Gradle
+        if: steps.extract.outputs.project == 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+          cache-read-only: false
+
+      - name: Accept Android SDK licenses
+        if: steps.extract.outputs.project == 'true'
+        run: yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Build Debug APK
+        if: steps.extract.outputs.project == 'true'
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Upload Debug APK Artifact
+        if: steps.extract.outputs.project == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+          if-no-files-found: error
+
+      # Tes tidak memblokir APK; hasilnya tetap terlihat di log kalau ada yang gagal.
+      - name: Run Unit Tests (tidak memblokir)
+        if: steps.extract.outputs.project == 'true'
+        continue-on-error: true
+        run: gradle :app:testDebugUnitTest --continue
+
+      # Simpan hasil extract ke repo dan hapus zip-nya, supaya push berikutnya
+      # langsung membangun dari source. Commit dari GITHUB_TOKEN tidak memicu workflow baru.
+      - name: Commit hasil extract ke repo
+        if: steps.extract.outputs.zip != '' && steps.extract.outputs.project == 'true'
+        env:
+          ZIP_FILE: ${{ steps.extract.outputs.zip }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -q --cached -- "$ZIP_FILE" || true
+          rm -f -- "$ZIP_FILE"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Tidak ada perubahan untuk di-commit."
+          else
+            git commit -m "Extract proyek dari zip"
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
+          
