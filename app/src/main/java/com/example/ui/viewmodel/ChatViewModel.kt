@@ -138,8 +138,23 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // Hapus emoji tanpa regex property Unicode (\p{Extended_Pictographic} tidak dikenal di banyak
+    // versi Android dan melempar PatternSyntaxException -> force close).
     private fun removeEmojis(text: String): String {
-        return text.replace(Regex("[\\p{So}\\p{Cs}\\p{Extended_Pictographic}\\uD83C-\\uDBFF\\uDC00-\\uDFFF]"), "").trim()
+        val sb = StringBuilder(text.length)
+        var i = 0
+        while (i < text.length) {
+            val cp = text.codePointAt(i)
+            i += Character.charCount(cp)
+            val type = Character.getType(cp)
+            val isEmojiLike =
+                cp >= 0x10000 ||
+                type == Character.OTHER_SYMBOL.toInt() ||
+                type == Character.SURROGATE.toInt() ||
+                cp == 0x200D || cp == 0xFE0F
+            if (!isEmojiLike) sb.appendCodePoint(cp)
+        }
+        return sb.toString().trim()
     }
 
     private fun getPersonaGreeting(): String {
@@ -264,6 +279,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         sttManager.stopListening()
 
         viewModelScope.launch {
+          try {
             // 1. Insert user message into Room
             chatDao.insertMessage(
                 ChatMessageEntity(
@@ -372,6 +388,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }
+          } catch (e: kotlinx.coroutines.CancellationException) {
+              _isAiTyping.value = false
+              throw e
+          } catch (e: Throwable) {
+              // Jangan biarkan aplikasi force close; tampilkan penyebabnya di chat.
+              android.util.Log.e("ChatViewModel", "sendMessage gagal", e)
+              _isAiTyping.value = false
+              try {
+                  chatDao.insertMessage(
+                      ChatMessageEntity(
+                          role = "model",
+                          content = "Maaf, terjadi kendala: ${e.javaClass.simpleName}: ${e.message ?: "tanpa pesan"}"
+                      )
+                  )
+              } catch (ignored: Throwable) { }
+          }
         }
     }
 
