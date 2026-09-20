@@ -1,0 +1,15 @@
+# Gradle / Android
+.gradle/
+build/
+**/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+
+# Rahasia - jangan pernah di-commit
+.env
+*.jks
+*.keystore
+debug.keystore.base64
+.kotlin/
